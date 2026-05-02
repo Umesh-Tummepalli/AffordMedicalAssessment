@@ -1,104 +1,43 @@
-const express = require('express');
-const mongoose = require('mongoose');
-const cors = require('cors');
-const { fetchMockData } = require('./utils/mockData');
-const Product = require('./models/Product');
+require("dotenv").config({ quiet: true });
 
-const { MongoMemoryServer } = require('mongodb-memory-server');
+const app = require("./src/app");
+const env = require("./src/config/env");
+const appLogger = require("./src/services/logService");
+const urlRepository = require("./src/repositories/urlRepository");
 
-const app = express();
-app.use(cors());
-app.use(express.json());
+async function startServer() {
+  await urlRepository.ensureStore();
 
-const PORT = 3000;
-const COMPANIES = ['AMZ', 'FLP', 'SNP', 'MYN', 'AZO'];
-
-// Connect to MongoDB
-let mongoServer;
-const startServer = async () => {
-  mongoServer = await MongoMemoryServer.create();
-  const mongoUri = mongoServer.getUri();
-  
-  await mongoose.connect(mongoUri);
-  console.log(`Connected to in-memory MongoDB at ${mongoUri}`);
-};
-startServer().catch(console.error);
-
-// GET /categories/:categoryname/products
-app.get('/categories/:categoryname/products', async (req, res) => {
-  try {
-    const { categoryname } = req.params;
-    let { n = 10, page = 1, minPrice = 0, maxPrice = 1000000, sort, order = 'asc' } = req.query;
-    
-    n = parseInt(n);
-    page = parseInt(page);
-    minPrice = parseInt(minPrice);
-    maxPrice = parseInt(maxPrice);
-
-    // To handle pagination accurately across companies, we fetch n * page from each company
-    // in a real scenario to ensure we have enough global top items.
-    const fetchTop = n * page;
-
-    // Fetch from all companies concurrently
-    const fetchPromises = COMPANIES.map(company => 
-      fetchMockData(company, categoryname, fetchTop, minPrice, maxPrice)
+  const server = app.listen(env.port, () => {
+    void appLogger.info(
+      "config",
+      `backend server started on port=${env.port} env=${env.nodeEnv}`,
     );
-    
-    const results = await Promise.all(fetchPromises);
-    let allProducts = results.flat();
+  });
 
-    // Store in MongoDB and get assigned IDs
-    const savedProducts = [];
-    for (const p of allProducts) {
-      // Upsert based on productName, company, category
-      const saved = await Product.findOneAndUpdate(
-        { productName: p.productName, company: p.company, category: p.category },
-        { $set: p },
-        { upsert: true, new: true }
-      );
-      savedProducts.push(saved);
-    }
+  server.on("error", (error) => {
+    void appLogger.fatal(
+      "config",
+      `server listener error: ${error.message || "unknown error"}`,
+    );
+  });
 
-    // Now sort
-    if (sort) {
-      savedProducts.sort((a, b) => {
-        let valA = a[sort];
-        let valB = b[sort];
-        if (typeof valA === 'string') valA = valA.toLowerCase();
-        if (typeof valB === 'string') valB = valB.toLowerCase();
-        
-        if (valA < valB) return order === 'asc' ? -1 : 1;
-        if (valA > valB) return order === 'asc' ? 1 : -1;
-        return 0;
-      });
-    }
+  return server;
+}
 
-    // Paginate
-    const startIndex = (page - 1) * n;
-    const paginatedProducts = savedProducts.slice(startIndex, startIndex + n);
-
-    res.json(paginatedProducts);
-  } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: 'Internal Server Error' });
-  }
+process.on("unhandledRejection", (reason) => {
+  const message = reason instanceof Error ? reason.message : String(reason);
+  void appLogger.fatal("config", `unhandled rejection: ${message}`);
 });
 
-// GET /categories/:categoryname/products/:productid
-app.get('/categories/:categoryname/products/:productid', async (req, res) => {
-  try {
-    const { productid } = req.params;
-    const product = await Product.findById(productid);
-    if (!product) {
-      return res.status(404).json({ error: 'Product not found' });
-    }
-    res.json(product);
-  } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: 'Internal Server Error' });
-  }
+process.on("uncaughtException", (error) => {
+  void appLogger.fatal("config", `uncaught exception: ${error.message}`);
 });
 
-app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
+startServer().catch(async (error) => {
+  await appLogger.fatal(
+    "config",
+    `server bootstrap failed: ${error.message || "unknown error"}`,
+  );
+  process.exit(1);
 });

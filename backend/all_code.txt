@@ -1,0 +1,1383 @@
+﻿=== C:\Users\umesh\Downloads\Afford Medical\backend\src\app.js ===
+const cors = require("cors");
+const express = require("express");
+
+const env = require("./config/env");
+const { redirectToOriginalUrl } = require("./controllers/urlController");
+const errorHandler = require("./middleware/errorHandler");
+const notFound = require("./middleware/notFound");
+const requestContext = require("./middleware/requestContext");
+const requestLogger = require("./middleware/requestLogger");
+const apiRouter = require("./routes");
+
+const app = express();
+
+app.set("publicBaseUrl", env.publicBaseUrl);
+app.use(cors());
+app.use(express.json({ limit: "1mb" }));
+app.use(requestContext);
+app.use(requestLogger);
+app.get("/r/:shortCode", redirectToOriginalUrl);
+app.use("/api/v1", apiRouter);
+app.use(notFound);
+app.use(errorHandler);
+
+module.exports = app;
+
+
+=== C:\Users\umesh\Downloads\Afford Medical\backend\src\config\env.js ===
+const path = require("path");
+
+function parseInteger(value, fallback) {
+  const parsed = Number.parseInt(value, 10);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+module.exports = {
+  nodeEnv: process.env.NODE_ENV || "development",
+  port: parseInteger(process.env.PORT, 3000),
+  affordmedBaseUrl:
+    process.env.AFFORDMED_BASE_URL ||
+    "http://20.244.56.144/evaluation-service",
+  httpTimeoutMs: parseInteger(process.env.HTTP_TIMEOUT_MS, 8000),
+  tokenTtlSecondsFallback: parseInteger(
+    process.env.AFFORDMED_TOKEN_TTL_SECONDS,
+    3300,
+  ),
+  publicBaseUrl: process.env.PUBLIC_BASE_URL || "",
+  dataFilePath:
+    process.env.URL_STORE_FILE ||
+    path.join(__dirname, "..", "..", "data", "urls.json"),
+  defaultCredentials: {
+    email: process.env.AFFORDMED_EMAIL || "",
+    name: process.env.AFFORDMED_NAME || "",
+    rollNo: process.env.AFFORDMED_ROLL_NO || "",
+    clientID: process.env.AFFORDMED_CLIENT_ID || "",
+    clientSecret: process.env.AFFORDMED_CLIENT_SECRET || "",
+  },
+};
+
+
+=== C:\Users\umesh\Downloads\Afford Medical\backend\src\config\logging.js ===
+const LOG_STACKS = ["backend", "frontend"];
+const LOG_LEVELS = ["debug", "info", "warn", "error", "fatal"];
+const LOG_PACKAGES = [
+  "component",
+  "hook",
+  "page",
+  "state",
+  "style",
+  "auth",
+  "config",
+  "middleware",
+  "utils",
+];
+
+module.exports = {
+  LOG_LEVELS,
+  LOG_PACKAGES,
+  LOG_STACKS,
+};
+
+
+=== C:\Users\umesh\Downloads\Afford Medical\backend\src\controllers\authController.js ===
+const asyncHandler = require("../middleware/asyncHandler");
+const appLogger = require("../services/logService");
+const {
+  authenticateCandidate,
+  getValidAccessToken,
+} = require("../services/affordmedAuthService");
+const { validateAuthPayload } = require("../validators/authValidators");
+
+const issueToken = asyncHandler(async (req, res) => {
+  const payload = validateAuthPayload(req.body || {});
+  const tokenState = await authenticateCandidate(payload);
+
+  await appLogger.info(
+    "auth",
+    `access token issued for rollNo=${payload.rollNo} requestId=${req.requestId}`,
+  );
+
+  res.status(200).json({
+    success: true,
+    data: tokenState,
+  });
+});
+
+const refreshToken = asyncHandler(async (req, res) => {
+  const credentials =
+    req.body && Object.keys(req.body).length > 0
+      ? validateAuthPayload(req.body)
+      : null;
+  const tokenState = await getValidAccessToken({
+    credentials,
+    forceRefresh: true,
+  });
+
+  await appLogger.info(
+    "auth",
+    `access token refreshed requestId=${req.requestId}`,
+  );
+
+  res.status(200).json({
+    success: true,
+    data: tokenState,
+  });
+});
+
+module.exports = {
+  issueToken,
+  refreshToken,
+};
+
+
+=== C:\Users\umesh\Downloads\Afford Medical\backend\src\controllers\healthController.js ===
+const asyncHandler = require("../middleware/asyncHandler");
+const appLogger = require("../services/logService");
+
+const getHealth = asyncHandler(async (req, res) => {
+  await appLogger.debug(
+    "config",
+    `health check served requestId=${req.requestId}`,
+  );
+
+  res.status(200).json({
+    success: true,
+    data: {
+      service: "affordmed-backend-submission",
+      status: "ok",
+      timestamp: new Date().toISOString(),
+      bufferedLogCount: appLogger.getBufferedLogs().length,
+    },
+  });
+});
+
+module.exports = {
+  getHealth,
+};
+
+
+=== C:\Users\umesh\Downloads\Afford Medical\backend\src\controllers\registrationController.js ===
+const asyncHandler = require("../middleware/asyncHandler");
+const appLogger = require("../services/logService");
+const { registerCandidate } = require("../services/affordmedAuthService");
+const { validateRegistrationPayload } = require("../validators/authValidators");
+
+const register = asyncHandler(async (req, res) => {
+  const payload = validateRegistrationPayload(req.body || {});
+  const registrationResponse = await registerCandidate(payload);
+
+  await appLogger.info(
+    "auth",
+    `client registration completed for rollNo=${payload.rollNo} requestId=${req.requestId}`,
+  );
+
+  res.status(201).json({
+    success: true,
+    data: registrationResponse,
+  });
+});
+
+module.exports = {
+  register,
+};
+
+
+=== C:\Users\umesh\Downloads\Afford Medical\backend\src\controllers\urlController.js ===
+const asyncHandler = require("../middleware/asyncHandler");
+const urlRepository = require("../repositories/urlRepository");
+const appLogger = require("../services/logService");
+const { createUrlShortenerService } = require("../services/urlShortenerService");
+const { validateCreateUrlPayload } = require("../validators/urlValidators");
+
+const urlService = createUrlShortenerService({
+  repository: urlRepository,
+  logger: appLogger,
+});
+
+function buildPublicBaseUrl(req) {
+  return req.app.get("publicBaseUrl") || `${req.protocol}://${req.get("host")}`;
+}
+
+function serializeUrlRecord(req, record) {
+  return {
+    id: record.id,
+    shortCode: record.shortCode,
+    shortUrl: `${buildPublicBaseUrl(req)}/r/${record.shortCode}`,
+    originalUrl: record.originalUrl,
+    createdAt: record.createdAt,
+    updatedAt: record.updatedAt,
+    expiresAt: record.expiresAt,
+    accessCount: record.accessCount,
+    lastAccessedAt: record.lastAccessedAt,
+    status: record.status || "active",
+  };
+}
+
+const createShortUrl = asyncHandler(async (req, res) => {
+  const payload = validateCreateUrlPayload(req.body || {});
+
+  await appLogger.info(
+    "utils",
+    `create short url request received requestId=${req.requestId}`,
+  );
+
+  const createdRecord = await urlService.createShortUrl(payload);
+
+  res.status(201).json({
+    success: true,
+    data: serializeUrlRecord(req, createdRecord),
+  });
+});
+
+const listShortUrls = asyncHandler(async (req, res) => {
+  const records = await urlService.listShortUrls();
+
+  await appLogger.info(
+    "utils",
+    `list short urls request completed count=${records.length} requestId=${req.requestId}`,
+  );
+
+  res.status(200).json({
+    success: true,
+    data: {
+      count: records.length,
+      items: records.map((record) => serializeUrlRecord(req, record)),
+    },
+  });
+});
+
+const getShortUrl = asyncHandler(async (req, res) => {
+  const record = await urlService.getShortUrl(req.params.shortCode);
+
+  await appLogger.info(
+    "utils",
+    `short url details fetched shortCode=${req.params.shortCode} requestId=${req.requestId}`,
+  );
+
+  res.status(200).json({
+    success: true,
+    data: serializeUrlRecord(req, record),
+  });
+});
+
+const getShortUrlStats = asyncHandler(async (req, res) => {
+  const record = await urlService.getShortUrl(req.params.shortCode);
+
+  await appLogger.info(
+    "utils",
+    `short url stats fetched shortCode=${req.params.shortCode} requestId=${req.requestId}`,
+  );
+
+  res.status(200).json({
+    success: true,
+    data: {
+      shortCode: record.shortCode,
+      originalUrl: record.originalUrl,
+      accessCount: record.accessCount,
+      lastAccessedAt: record.lastAccessedAt,
+      createdAt: record.createdAt,
+      expiresAt: record.expiresAt,
+      status: record.status,
+    },
+  });
+});
+
+const deleteShortUrl = asyncHandler(async (req, res) => {
+  const record = await urlService.deleteShortUrl(req.params.shortCode);
+
+  await appLogger.warn(
+    "utils",
+    `short url removed shortCode=${record.shortCode} requestId=${req.requestId}`,
+  );
+
+  res.status(200).json({
+    success: true,
+    data: serializeUrlRecord(req, {
+      ...record,
+      status: "deleted",
+    }),
+  });
+});
+
+const redirectToOriginalUrl = asyncHandler(async (req, res) => {
+  const record = await urlService.resolveShortCode(req.params.shortCode);
+
+  await appLogger.info(
+    "utils",
+    `redirecting short code=${record.shortCode} requestId=${req.requestId}`,
+  );
+
+  res.redirect(302, record.originalUrl);
+});
+
+module.exports = {
+  createShortUrl,
+  deleteShortUrl,
+  getShortUrl,
+  getShortUrlStats,
+  listShortUrls,
+  redirectToOriginalUrl,
+};
+
+
+=== C:\Users\umesh\Downloads\Afford Medical\backend\src\errors\AppError.js ===
+class AppError extends Error {
+  constructor(statusCode, message, details = null, code = "APP_ERROR") {
+    super(message);
+    this.name = "AppError";
+    this.statusCode = statusCode;
+    this.details = details;
+    this.code = code;
+    this.isOperational = true;
+  }
+}
+
+module.exports = AppError;
+
+
+=== C:\Users\umesh\Downloads\Afford Medical\backend\src\middleware\asyncHandler.js ===
+function asyncHandler(handler) {
+  return async function wrappedHandler(req, res, next) {
+    try {
+      await handler(req, res, next);
+    } catch (error) {
+      next(error);
+    }
+  };
+}
+
+module.exports = asyncHandler;
+
+
+=== C:\Users\umesh\Downloads\Afford Medical\backend\src\middleware\errorHandler.js ===
+const AppError = require("../errors/AppError");
+const appLogger = require("../services/logService");
+
+function isJsonSyntaxError(error) {
+  return error instanceof SyntaxError && error.status === 400 && "body" in error;
+}
+
+async function errorHandler(error, req, res, next) {
+  if (res.headersSent) {
+    return next(error);
+  }
+
+  let finalError = error;
+
+  if (isJsonSyntaxError(error)) {
+    finalError = new AppError(
+      400,
+      "Malformed JSON request body.",
+      null,
+      "INVALID_JSON",
+    );
+  }
+
+  const statusCode = finalError.statusCode || 500;
+  const message =
+    statusCode >= 500 ? "Internal Server Error" : finalError.message;
+
+  await appLogger.error(
+    "middleware",
+    `request failed method=${req.method} path=${req.originalUrl} status=${statusCode} requestId=${req.requestId} error=${finalError.message}`,
+  );
+
+  return res.status(statusCode).json({
+    success: false,
+    error: {
+      code: finalError.code || "INTERNAL_ERROR",
+      message,
+      details: finalError.details || null,
+      requestId: req.requestId,
+    },
+  });
+}
+
+module.exports = errorHandler;
+
+
+=== C:\Users\umesh\Downloads\Afford Medical\backend\src\middleware\notFound.js ===
+const AppError = require("../errors/AppError");
+
+function notFound(req, res, next) {
+  next(
+    new AppError(
+      404,
+      `Route ${req.method} ${req.originalUrl} does not exist`,
+      null,
+      "ROUTE_NOT_FOUND",
+    ),
+  );
+}
+
+module.exports = notFound;
+
+
+=== C:\Users\umesh\Downloads\Afford Medical\backend\src\middleware\requestContext.js ===
+const crypto = require("crypto");
+
+function requestContext(req, res, next) {
+  req.requestId = crypto.randomUUID();
+  req.requestStartedAt = Date.now();
+  res.setHeader("X-Request-Id", req.requestId);
+  next();
+}
+
+module.exports = requestContext;
+
+
+=== C:\Users\umesh\Downloads\Afford Medical\backend\src\middleware\requestLogger.js ===
+const appLogger = require("../services/logService");
+
+function requestLogger(req, res, next) {
+  void appLogger.info(
+    "middleware",
+    `request started method=${req.method} path=${req.originalUrl} requestId=${req.requestId}`,
+  );
+
+  res.on("finish", () => {
+    const durationMs = Date.now() - req.requestStartedAt;
+    const level =
+      res.statusCode >= 500
+        ? "error"
+        : res.statusCode >= 400
+          ? "warn"
+          : "info";
+
+    void appLogger.log({
+      level,
+      packageName: "middleware",
+      message: `request completed method=${req.method} path=${req.originalUrl} status=${res.statusCode} durationMs=${durationMs} requestId=${req.requestId}`,
+    });
+  });
+
+  next();
+}
+
+module.exports = requestLogger;
+
+
+=== C:\Users\umesh\Downloads\Afford Medical\backend\src\middleware\requireAccessToken.js ===
+const AppError = require("../errors/AppError");
+const { ensureAuthorizedToken } = require("../services/affordmedAuthService");
+
+async function requireAccessToken(req, res, next) {
+  try {
+    const authorizationHeader = req.headers.authorization || "";
+
+    if (!authorizationHeader.startsWith("Bearer ")) {
+      throw new AppError(
+        401,
+        "Authorization header must be in the format Bearer <token>.",
+        null,
+        "AUTH_HEADER_INVALID",
+      );
+    }
+
+    const accessToken = authorizationHeader.slice("Bearer ".length).trim();
+    await ensureAuthorizedToken(accessToken);
+    next();
+  } catch (error) {
+    next(error);
+  }
+}
+
+module.exports = requireAccessToken;
+
+
+=== C:\Users\umesh\Downloads\Afford Medical\backend\src\repositories\urlRepository.js ===
+const env = require("../config/env");
+const {
+  ensureJsonArrayFile,
+  readJsonArrayFile,
+  writeJsonArrayFile,
+} = require("../utils/fileStore");
+
+let mutationQueue = Promise.resolve();
+
+async function ensureStore() {
+  await ensureJsonArrayFile(env.dataFilePath);
+}
+
+async function listAll() {
+  await mutationQueue.catch(() => {});
+  return readJsonArrayFile(env.dataFilePath);
+}
+
+function queueMutation(mutator) {
+  const task = mutationQueue.then(async () => {
+    const currentRecords = await readJsonArrayFile(env.dataFilePath);
+    const { nextRecords, value } = await mutator(currentRecords);
+    await writeJsonArrayFile(env.dataFilePath, nextRecords);
+    return value;
+  });
+
+  mutationQueue = task.catch(() => {});
+  return task;
+}
+
+async function findByShortCode(shortCode) {
+  const records = await listAll();
+  return records.find((record) => record.shortCode === shortCode) || null;
+}
+
+async function create(record) {
+  return queueMutation(async (records) => ({
+    nextRecords: [...records, record],
+    value: record,
+  }));
+}
+
+async function updateByShortCode(shortCode, updater) {
+  return queueMutation(async (records) => {
+    const index = records.findIndex((record) => record.shortCode === shortCode);
+
+    if (index === -1) {
+      return {
+        nextRecords: records,
+        value: null,
+      };
+    }
+
+    const updatedRecord = await updater({ ...records[index] });
+    const nextRecords = [...records];
+    nextRecords[index] = updatedRecord;
+
+    return {
+      nextRecords,
+      value: updatedRecord,
+    };
+  });
+}
+
+async function deleteByShortCode(shortCode) {
+  return queueMutation(async (records) => {
+    const index = records.findIndex((record) => record.shortCode === shortCode);
+
+    if (index === -1) {
+      return {
+        nextRecords: records,
+        value: null,
+      };
+    }
+
+    const deletedRecord = records[index];
+    const nextRecords = records.filter((record) => record.shortCode !== shortCode);
+
+    return {
+      nextRecords,
+      value: deletedRecord,
+    };
+  });
+}
+
+module.exports = {
+  create,
+  deleteByShortCode,
+  ensureStore,
+  findByShortCode,
+  listAll,
+  updateByShortCode,
+};
+
+
+=== C:\Users\umesh\Downloads\Afford Medical\backend\src\routes\authRoutes.js ===
+const express = require("express");
+
+const { issueToken, refreshToken } = require("../controllers/authController");
+
+const router = express.Router();
+
+router.post("/token", issueToken);
+router.post("/refresh", refreshToken);
+
+module.exports = router;
+
+
+=== C:\Users\umesh\Downloads\Afford Medical\backend\src\routes\index.js ===
+const express = require("express");
+
+const { getHealth } = require("../controllers/healthController");
+const authRoutes = require("./authRoutes");
+const registrationRoutes = require("./registrationRoutes");
+const urlRoutes = require("./urlRoutes");
+
+const router = express.Router();
+
+router.get("/health", getHealth);
+router.use("/register", registrationRoutes);
+router.use("/auth", authRoutes);
+router.use("/urls", urlRoutes);
+
+module.exports = router;
+
+
+=== C:\Users\umesh\Downloads\Afford Medical\backend\src\routes\registrationRoutes.js ===
+const express = require("express");
+
+const { register } = require("../controllers/registrationController");
+
+const router = express.Router();
+
+router.post("/", register);
+
+module.exports = router;
+
+
+=== C:\Users\umesh\Downloads\Afford Medical\backend\src\routes\urlRoutes.js ===
+const express = require("express");
+
+const {
+  createShortUrl,
+  deleteShortUrl,
+  getShortUrl,
+  getShortUrlStats,
+  listShortUrls,
+} = require("../controllers/urlController");
+const requireAccessToken = require("../middleware/requireAccessToken");
+
+const router = express.Router();
+
+router.use(requireAccessToken);
+router.post("/", createShortUrl);
+router.get("/", listShortUrls);
+router.get("/:shortCode/stats", getShortUrlStats);
+router.get("/:shortCode", getShortUrl);
+router.delete("/:shortCode", deleteShortUrl);
+
+module.exports = router;
+
+
+=== C:\Users\umesh\Downloads\Afford Medical\backend\src\services\affordmedAuthService.js ===
+const axios = require("axios");
+
+const env = require("../config/env");
+const AppError = require("../errors/AppError");
+const runtimeAuthStore = require("../state/runtimeAuthStore");
+
+const affordmedClient = axios.create({
+  baseURL: env.affordmedBaseUrl,
+  timeout: env.httpTimeoutMs,
+  headers: {
+    "Content-Type": "application/json",
+  },
+});
+
+function isPopulated(value) {
+  return typeof value === "string" && value.trim().length > 0;
+}
+
+function normalizeCredentials(candidate = {}) {
+  return {
+    email: candidate.email?.trim() || "",
+    name: candidate.name?.trim() || "",
+    rollNo: candidate.rollNo?.trim() || "",
+    clientID: candidate.clientID?.trim() || "",
+    clientSecret: candidate.clientSecret?.trim() || "",
+  };
+}
+
+function areCredentialsComplete(candidate) {
+  return (
+    isPopulated(candidate.email) &&
+    isPopulated(candidate.name) &&
+    isPopulated(candidate.rollNo) &&
+    isPopulated(candidate.clientID) &&
+    isPopulated(candidate.clientSecret)
+  );
+}
+
+function resolveCredentials(overrideCredentials = null) {
+  const merged = normalizeCredentials({
+    ...env.defaultCredentials,
+    ...(runtimeAuthStore.getCredentials() || {}),
+    ...(overrideCredentials || {}),
+  });
+
+  if (!areCredentialsComplete(merged)) {
+    throw new AppError(
+      503,
+      "AffordMed credentials are not configured. Register first or configure AFFORDMED_* environment variables.",
+      {
+        missingFields: Object.entries(merged)
+          .filter(([, value]) => !isPopulated(value))
+          .map(([key]) => key),
+      },
+      "AFFORDMED_CREDENTIALS_MISSING",
+    );
+  }
+
+  return merged;
+}
+
+function parseExpiryTimestamp(rawValue) {
+  if (!rawValue) {
+    return null;
+  }
+
+  if (typeof rawValue === "number") {
+    return new Date(rawValue).toISOString();
+  }
+
+  const parsed = new Date(rawValue);
+  return Number.isNaN(parsed.getTime()) ? null : parsed.toISOString();
+}
+
+function buildTokenState(responseData) {
+  const accessToken =
+    responseData.access_token || responseData.accessToken || null;
+  const tokenType =
+    responseData.token_type || responseData.tokenType || "Bearer";
+  const expiresAt =
+    parseExpiryTimestamp(responseData.expires_at) ||
+    parseExpiryTimestamp(responseData.expiresAt) ||
+    new Date(
+      Date.now() +
+        (Number(responseData.expires_in || responseData.expiresIn) ||
+          env.tokenTtlSecondsFallback) *
+          1000,
+    ).toISOString();
+
+  if (!isPopulated(accessToken)) {
+    throw new AppError(
+      502,
+      "AffordMed auth response did not include an access token.",
+      responseData,
+      "AFFORDMED_TOKEN_INVALID",
+    );
+  }
+
+  return {
+    accessToken,
+    tokenType,
+    expiresAt,
+    issuedAt: new Date().toISOString(),
+  };
+}
+
+function normalizeExternalError(error, fallbackMessage) {
+  if (axios.isAxiosError(error)) {
+    const statusCode =
+      error.response?.status && error.response.status < 500
+        ? error.response.status
+        : 502;
+    const responseData = error.response?.data || null;
+    const message =
+      responseData?.message ||
+      responseData?.error ||
+      error.message ||
+      fallbackMessage;
+
+    throw new AppError(
+      statusCode,
+      message,
+      responseData,
+      "AFFORDMED_UPSTREAM_ERROR",
+    );
+  }
+
+  throw error;
+}
+
+function isTokenExpired(tokenState) {
+  if (!tokenState?.expiresAt) {
+    return false;
+  }
+
+  return new Date(tokenState.expiresAt).getTime() <= Date.now();
+}
+
+async function registerCandidate(payload) {
+  try {
+    const response = await affordmedClient.post("/register", payload);
+
+    const credentials = normalizeCredentials({
+      email: payload.email,
+      name: payload.name,
+      rollNo: payload.rollNo,
+      clientID: response.data.clientID || response.data.clientId,
+      clientSecret: response.data.clientSecret,
+    });
+
+    if (areCredentialsComplete(credentials)) {
+      runtimeAuthStore.setCredentials(credentials);
+    }
+
+    return response.data;
+  } catch (error) {
+    normalizeExternalError(error, "AffordMed registration failed.");
+  }
+}
+
+async function authenticateCandidate(payload) {
+  const credentials = resolveCredentials(payload);
+  runtimeAuthStore.setCredentials(credentials);
+
+  try {
+    const response = await affordmedClient.post("/auth", credentials);
+    const tokenState = buildTokenState(response.data);
+    runtimeAuthStore.setToken(tokenState);
+    return tokenState;
+  } catch (error) {
+    runtimeAuthStore.clearToken();
+    normalizeExternalError(error, "AffordMed authentication failed.");
+  }
+}
+
+async function getValidAccessToken(options = {}) {
+  const { forceRefresh = false, credentials = null } = options;
+  const cachedToken = runtimeAuthStore.getToken();
+
+  if (!forceRefresh && cachedToken && !isTokenExpired(cachedToken)) {
+    return cachedToken;
+  }
+
+  return authenticateCandidate(credentials);
+}
+
+async function ensureAuthorizedToken(accessToken) {
+  if (!isPopulated(accessToken)) {
+    throw new AppError(401, "Missing bearer token.", null, "TOKEN_MISSING");
+  }
+
+  const activeToken = await getValidAccessToken();
+
+  if (isTokenExpired(activeToken)) {
+    throw new AppError(401, "Access token has expired.", null, "TOKEN_EXPIRED");
+  }
+
+  if (activeToken.accessToken !== accessToken.trim()) {
+    throw new AppError(
+      401,
+      "Provided bearer token does not match the active access token.",
+      null,
+      "TOKEN_MISMATCH",
+    );
+  }
+
+  return activeToken;
+}
+
+module.exports = {
+  authenticateCandidate,
+  ensureAuthorizedToken,
+  getValidAccessToken,
+  registerCandidate,
+};
+
+
+=== C:\Users\umesh\Downloads\Afford Medical\backend\src\services\logService.js ===
+const axios = require("axios");
+
+const env = require("../config/env");
+const { LOG_LEVELS, LOG_PACKAGES, LOG_STACKS } = require("../config/logging");
+const { getValidAccessToken } = require("./affordmedAuthService");
+
+const logClient = axios.create({
+  baseURL: env.affordmedBaseUrl,
+  timeout: env.httpTimeoutMs,
+  headers: {
+    "Content-Type": "application/json",
+  },
+});
+
+const bufferedLogs = [];
+const MAX_BUFFERED_LOGS = 100;
+
+function pushBufferedLog(entry) {
+  bufferedLogs.push({
+    ...entry,
+    bufferedAt: new Date().toISOString(),
+  });
+
+  if (bufferedLogs.length > MAX_BUFFERED_LOGS) {
+    bufferedLogs.shift();
+  }
+}
+
+function normalizeLogPayload({
+  stack = "backend",
+  level = "info",
+  packageName = "utils",
+  message,
+}) {
+  return {
+    stack: LOG_STACKS.includes(stack) ? stack : "backend",
+    level: LOG_LEVELS.includes(level) ? level : "info",
+    package: LOG_PACKAGES.includes(packageName) ? packageName : "utils",
+    message: typeof message === "string" ? message : JSON.stringify(message),
+  };
+}
+
+async function transmitLog(payload, allowRetry = true) {
+  try {
+    const tokenState = await getValidAccessToken();
+    const response = await logClient.post("/logs", payload, {
+      headers: {
+        Authorization: `${tokenState.tokenType} ${tokenState.accessToken}`,
+      },
+    });
+
+    return {
+      sent: true,
+      response: response.data,
+    };
+  } catch (error) {
+    if (allowRetry && error.response?.status === 401) {
+      await getValidAccessToken({ forceRefresh: true });
+      return transmitLog(payload, false);
+    }
+
+    pushBufferedLog({
+      payload,
+      reason:
+        error.response?.data?.message ||
+        error.message ||
+        "log transmission failed",
+    });
+
+    return {
+      sent: false,
+      reason:
+        error.response?.data?.message ||
+        error.message ||
+        "log transmission failed",
+    };
+  }
+}
+
+async function log({ stack = "backend", level = "info", packageName, message }) {
+  const payload = normalizeLogPayload({ stack, level, packageName, message });
+  return transmitLog(payload);
+}
+
+async function debug(packageName, message) {
+  return log({ level: "debug", packageName, message });
+}
+
+async function info(packageName, message) {
+  return log({ level: "info", packageName, message });
+}
+
+async function warn(packageName, message) {
+  return log({ level: "warn", packageName, message });
+}
+
+async function error(packageName, message) {
+  return log({ level: "error", packageName, message });
+}
+
+async function fatal(packageName, message) {
+  return log({ level: "fatal", packageName, message });
+}
+
+function getBufferedLogs() {
+  return [...bufferedLogs];
+}
+
+module.exports = {
+  debug,
+  error,
+  fatal,
+  getBufferedLogs,
+  info,
+  log,
+  warn,
+};
+
+
+=== C:\Users\umesh\Downloads\Afford Medical\backend\src\services\urlShortenerService.js ===
+const crypto = require("crypto");
+
+const AppError = require("../errors/AppError");
+
+function generateShortCode(length = 7) {
+  return crypto.randomBytes(length).toString("base64url").slice(0, length);
+}
+
+function isExpired(record, now = new Date()) {
+  if (!record.expiresAt) {
+    return false;
+  }
+
+  return new Date(record.expiresAt).getTime() <= now.getTime();
+}
+
+function buildStatus(record, now = new Date()) {
+  return isExpired(record, now) ? "expired" : "active";
+}
+
+function createUrlShortenerService({
+  repository,
+  logger,
+  now = () => new Date(),
+  codeGenerator = () => generateShortCode(7),
+}) {
+  async function ensureUniqueCode(preferredCode = null) {
+    if (preferredCode) {
+      const existing = await repository.findByShortCode(preferredCode);
+      if (existing) {
+        throw new AppError(
+          409,
+          `Short code ${preferredCode} is already in use.`,
+          null,
+          "SHORT_CODE_CONFLICT",
+        );
+      }
+
+      return preferredCode;
+    }
+
+    for (let attempt = 0; attempt < 10; attempt += 1) {
+      const generatedCode = codeGenerator();
+      const existing = await repository.findByShortCode(generatedCode);
+
+      if (!existing) {
+        return generatedCode;
+      }
+    }
+
+    throw new AppError(
+      500,
+      "Unable to generate a unique short code after multiple attempts.",
+      null,
+      "SHORT_CODE_GENERATION_FAILED",
+    );
+  }
+
+  function toRecord(input) {
+    const timestamp = now().toISOString();
+    const expiresAt = input.expiryMinutes
+      ? new Date(now().getTime() + input.expiryMinutes * 60 * 1000).toISOString()
+      : null;
+
+    return {
+      id: crypto.randomUUID(),
+      shortCode: input.shortCode,
+      originalUrl: input.originalUrl,
+      createdAt: timestamp,
+      updatedAt: timestamp,
+      expiresAt,
+      accessCount: 0,
+      lastAccessedAt: null,
+    };
+  }
+
+  async function createShortUrl({ originalUrl, customCode, expiryMinutes }) {
+    const shortCode = await ensureUniqueCode(customCode || null);
+    const record = toRecord({
+      originalUrl,
+      shortCode,
+      expiryMinutes,
+    });
+
+    const createdRecord = await repository.create(record);
+    await logger.info(
+      "utils",
+      `url created shortCode=${createdRecord.shortCode} expiresAt=${createdRecord.expiresAt || "never"}`,
+    );
+    return createdRecord;
+  }
+
+  async function listShortUrls() {
+    const records = await repository.listAll();
+    const currentTime = now();
+
+    return records
+      .map((record) => ({
+        ...record,
+        status: buildStatus(record, currentTime),
+      }))
+      .sort((left, right) => right.createdAt.localeCompare(left.createdAt));
+  }
+
+  async function getShortUrl(shortCode) {
+    const record = await repository.findByShortCode(shortCode);
+
+    if (!record) {
+      throw new AppError(404, "Short URL not found.", null, "SHORT_URL_NOT_FOUND");
+    }
+
+    return {
+      ...record,
+      status: buildStatus(record, now()),
+    };
+  }
+
+  async function resolveShortCode(shortCode) {
+    const record = await repository.findByShortCode(shortCode);
+
+    if (!record) {
+      throw new AppError(404, "Short URL not found.", null, "SHORT_URL_NOT_FOUND");
+    }
+
+    if (isExpired(record, now())) {
+      throw new AppError(410, "Short URL has expired.", null, "SHORT_URL_EXPIRED");
+    }
+
+    const resolvedRecord = await repository.updateByShortCode(shortCode, (current) => ({
+      ...current,
+      accessCount: current.accessCount + 1,
+      lastAccessedAt: now().toISOString(),
+      updatedAt: now().toISOString(),
+    }));
+
+    await logger.info(
+      "utils",
+      `short url resolved shortCode=${shortCode} accessCount=${resolvedRecord.accessCount}`,
+    );
+
+    return resolvedRecord;
+  }
+
+  async function deleteShortUrl(shortCode) {
+    const deletedRecord = await repository.deleteByShortCode(shortCode);
+
+    if (!deletedRecord) {
+      throw new AppError(404, "Short URL not found.", null, "SHORT_URL_NOT_FOUND");
+    }
+
+    await logger.warn("utils", `short url deleted shortCode=${shortCode}`);
+    return deletedRecord;
+  }
+
+  return {
+    createShortUrl,
+    deleteShortUrl,
+    getShortUrl,
+    listShortUrls,
+    resolveShortCode,
+  };
+}
+
+module.exports = {
+  createUrlShortenerService,
+};
+
+
+=== C:\Users\umesh\Downloads\Afford Medical\backend\src\state\runtimeAuthStore.js ===
+let cachedCredentials = null;
+let cachedToken = null;
+
+function setCredentials(credentials) {
+  cachedCredentials = {
+    email: credentials.email,
+    name: credentials.name,
+    rollNo: credentials.rollNo,
+    clientID: credentials.clientID,
+    clientSecret: credentials.clientSecret,
+  };
+}
+
+function getCredentials() {
+  return cachedCredentials;
+}
+
+function setToken(tokenState) {
+  cachedToken = {
+    accessToken: tokenState.accessToken,
+    tokenType: tokenState.tokenType || "Bearer",
+    expiresAt: tokenState.expiresAt || null,
+    issuedAt: tokenState.issuedAt || new Date().toISOString(),
+  };
+}
+
+function getToken() {
+  return cachedToken;
+}
+
+function clearToken() {
+  cachedToken = null;
+}
+
+module.exports = {
+  clearToken,
+  getCredentials,
+  getToken,
+  setCredentials,
+  setToken,
+};
+
+
+=== C:\Users\umesh\Downloads\Afford Medical\backend\src\utils\fileStore.js ===
+const fs = require("fs/promises");
+const path = require("path");
+
+async function ensureJsonArrayFile(filePath) {
+  await fs.mkdir(path.dirname(filePath), { recursive: true });
+
+  try {
+    await fs.access(filePath);
+  } catch (error) {
+    await fs.writeFile(filePath, "[]\n", "utf8");
+  }
+}
+
+async function readJsonArrayFile(filePath) {
+  await ensureJsonArrayFile(filePath);
+  const raw = await fs.readFile(filePath, "utf8");
+  if (!raw.trim()) {
+    return [];
+  }
+
+  const parsed = JSON.parse(raw);
+  return Array.isArray(parsed) ? parsed : [];
+}
+
+async function writeJsonArrayFile(filePath, records) {
+  await ensureJsonArrayFile(filePath);
+  await fs.writeFile(filePath, `${JSON.stringify(records, null, 2)}\n`, "utf8");
+}
+
+module.exports = {
+  ensureJsonArrayFile,
+  readJsonArrayFile,
+  writeJsonArrayFile,
+};
+
+
+=== C:\Users\umesh\Downloads\Afford Medical\backend\src\validators\authValidators.js ===
+const AppError = require("../errors/AppError");
+
+function requireTrimmedString(source, fieldName, label) {
+  const value = source[fieldName];
+
+  if (typeof value !== "string" || value.trim().length === 0) {
+    throw new AppError(
+      400,
+      `${label} is required.`,
+      {
+        field: fieldName,
+      },
+      "VALIDATION_ERROR",
+    );
+  }
+
+  return value.trim();
+}
+
+function validateRegistrationPayload(body) {
+  return {
+    email: requireTrimmedString(body, "email", "Email"),
+    name: requireTrimmedString(body, "name", "Name"),
+    mobileNo: requireTrimmedString(body, "mobileNo", "Mobile number"),
+    githubUsername: requireTrimmedString(
+      body,
+      "githubUsername",
+      "GitHub username",
+    ),
+    rollNo: requireTrimmedString(body, "rollNo", "Roll number"),
+    accessCode: requireTrimmedString(body, "accessCode", "Access code"),
+  };
+}
+
+function validateAuthPayload(body) {
+  return {
+    email: requireTrimmedString(body, "email", "Email"),
+    name: requireTrimmedString(body, "name", "Name"),
+    rollNo: requireTrimmedString(body, "rollNo", "Roll number"),
+    clientID: requireTrimmedString(body, "clientID", "Client ID"),
+    clientSecret: requireTrimmedString(body, "clientSecret", "Client secret"),
+  };
+}
+
+module.exports = {
+  validateAuthPayload,
+  validateRegistrationPayload,
+};
+
+
+=== C:\Users\umesh\Downloads\Afford Medical\backend\src\validators\urlValidators.js ===
+const AppError = require("../errors/AppError");
+
+function validateUrl(value) {
+  try {
+    const parsedUrl = new URL(value);
+    return parsedUrl.protocol === "http:" || parsedUrl.protocol === "https:";
+  } catch (error) {
+    return false;
+  }
+}
+
+function validateCreateUrlPayload(body) {
+  if (typeof body.originalUrl !== "string" || body.originalUrl.trim().length === 0) {
+    throw new AppError(
+      400,
+      "originalUrl is required.",
+      {
+        field: "originalUrl",
+      },
+      "VALIDATION_ERROR",
+    );
+  }
+
+  const originalUrl = body.originalUrl.trim();
+
+  if (!validateUrl(originalUrl)) {
+    throw new AppError(
+      400,
+      "originalUrl must be a valid http or https URL.",
+      {
+        field: "originalUrl",
+      },
+      "VALIDATION_ERROR",
+    );
+  }
+
+  let customCode = null;
+  if (body.customCode != null) {
+    if (typeof body.customCode !== "string" || body.customCode.trim().length === 0) {
+      throw new AppError(
+        400,
+        "customCode must be a non-empty string when provided.",
+        {
+          field: "customCode",
+        },
+        "VALIDATION_ERROR",
+      );
+    }
+
+    customCode = body.customCode.trim();
+    if (!/^[a-zA-Z0-9_-]{4,20}$/.test(customCode)) {
+      throw new AppError(
+        400,
+        "customCode must be 4-20 characters and contain only letters, numbers, hyphen, or underscore.",
+        {
+          field: "customCode",
+        },
+        "VALIDATION_ERROR",
+      );
+    }
+  }
+
+  let expiryMinutes = null;
+  if (body.expiryMinutes != null) {
+    const parsedExpiry = Number.parseInt(body.expiryMinutes, 10);
+
+    if (!Number.isInteger(parsedExpiry) || parsedExpiry < 1 || parsedExpiry > 525600) {
+      throw new AppError(
+        400,
+        "expiryMinutes must be an integer between 1 and 525600.",
+        {
+          field: "expiryMinutes",
+        },
+        "VALIDATION_ERROR",
+      );
+    }
+
+    expiryMinutes = parsedExpiry;
+  }
+
+  return {
+    customCode,
+    expiryMinutes,
+    originalUrl,
+  };
+}
+
+module.exports = {
+  validateCreateUrlPayload,
+};
+
+
