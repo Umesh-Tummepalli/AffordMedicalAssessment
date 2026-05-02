@@ -6,19 +6,54 @@ import ProductDetails from './pages/ProductDetails';
 
 const theme = createTheme({
   palette: {
-    mode: 'light',
+    mode: 'dark',
     primary: {
-      main: '#1976d2',
+      main: '#00e5ff',
     },
     secondary: {
-      main: '#f50057',
+      main: '#ff1744',
     },
     background: {
-      default: '#f4f6f8'
+      default: '#0a192f',
+      paper: '#112240'
+    },
+    text: {
+      primary: '#ccd6f6',
+      secondary: '#8892b0'
     }
   },
   typography: {
     fontFamily: '"Inter", "Roboto", "Helvetica", "Arial", sans-serif',
+    h4: {
+      fontWeight: 700,
+      letterSpacing: '-0.5px'
+    }
+  },
+  components: {
+    MuiButton: {
+      styleOverrides: {
+        root: {
+          borderRadius: 8,
+          textTransform: 'none',
+          fontWeight: 600,
+          transition: 'all 0.3s ease',
+          '&:hover': {
+            transform: 'translateY(-2px)',
+            boxShadow: '0 5px 15px rgba(0, 229, 255, 0.3)'
+          }
+        }
+      }
+    },
+    MuiCard: {
+      styleOverrides: {
+        root: {
+          borderRadius: 16,
+          background: 'rgba(17, 34, 64, 0.7)',
+          backdropFilter: 'blur(10px)',
+          border: '1px solid rgba(255,255,255,0.05)',
+        }
+      }
+    }
   }
 });
 
