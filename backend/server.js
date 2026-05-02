@@ -13,6 +13,7 @@ async function startServer() {
       "config",
       `backend server started on port=${env.port} env=${env.nodeEnv}`,
     );
+    console.log(`Backend server successfully started on port ${env.port}`);
   });
 
   server.on("error", (error) => {
@@ -20,6 +21,8 @@ async function startServer() {
       "config",
       `server listener error: ${error.message || "unknown error"}`,
     );
+    console.error("Critical server error:", error);
+    process.exit(1);
   });
 
   return server;
@@ -28,10 +31,14 @@ async function startServer() {
 process.on("unhandledRejection", (reason) => {
   const message = reason instanceof Error ? reason.message : String(reason);
   void appLogger.fatal("config", `unhandled rejection: ${message}`);
+  console.error("Unhandled rejection:", reason);
+  process.exit(1);
 });
 
 process.on("uncaughtException", (error) => {
   void appLogger.fatal("config", `uncaught exception: ${error.message}`);
+  console.error("Uncaught exception:", error);
+  process.exit(1);
 });
 
 startServer().catch(async (error) => {
