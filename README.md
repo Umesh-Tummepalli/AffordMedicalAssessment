@@ -26,6 +26,10 @@ We built this project focusing on **Enterprise-Grade Clean Architecture**. The b
 - **Repositories** handle data persistence (`urlRepository`).
 - **State** handles ephemeral in-memory state securely (`runtimeAuthStore`).
 
+### Architecture Diagram
+
+![Architecture Diagram](./image.png)
+
 To make the backend completely flawless and resilient, we implemented three major architectural upgrades:
 
 1. **Mutex Authentication Lock (Thundering Herd Prevention)**
